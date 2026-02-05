@@ -11,12 +11,11 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-CHANNEL_ID = "@bot_pro_bot_you"          # ← твой канал
+CHANNEL_ID = "@bot_pro_bot_you"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ====================== ПРОВЕРКА ПОДПИСКИ ======================
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(CHANNEL_ID, user_id)
@@ -24,7 +23,6 @@ async def is_subscribed(user_id: int) -> bool:
     except:
         return False
 
-# ====================== ЗАЩИЩЁННЫЙ ЗАПРОС К COINGECKO ======================
 def safe_get(url, params=None):
     try:
         r = requests.get(url, params=params, timeout=10)
@@ -53,7 +51,6 @@ def get_gainers_losers():
     losers  = safe_get(url, {**p, "order": "percent_change_24h_asc"})
     return gainers[:10], losers[:10]
 
-# ====================== ФОРМИРОВАНИЕ СООБЩЕНИЯ ======================
 def format_top_message():
     data = get_top10()
     if not data:
@@ -80,7 +77,6 @@ def main_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# ====================== ОБРАБОТЧИКИ ======================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     if not await is_subscribed(message.from_user.id):
@@ -133,7 +129,7 @@ async def protected_handler(callback: types.CallbackQuery):
 
     elif callback.data == "forecast":
         if not GROQ_API_KEY:
-            ai_text = "❌ GROQ_API_KEY не найден в переменных Railway"
+            ai_text = "❌ GROQ_API_KEY не найден"
         else:
             try:
                 r = requests.post(
@@ -143,7 +139,7 @@ async def protected_handler(callback: types.CallbackQuery):
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": "llama3-8b-8192",
+                        "model": "llama-3.1-8b-instant",          # ← новая модель (быстрая и бесплатная)
                         "messages": [{"role": "user", "content": "Ты крипто-аналитик. Дай короткий честный прогноз по рынку на 24–48 часов: топ гейнеры, риски, общее настроение. Не больше 150 слов."}],
                         "max_tokens": 300,
                         "temperature": 0.7
