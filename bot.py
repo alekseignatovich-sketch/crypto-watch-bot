@@ -7,26 +7,68 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import F
 from dotenv import load_dotenv
 
-load_dotenv()  # для локального запуска
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CHANNEL_ID = "@bot_pro_bot_you"  # ← твой канал
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ====================== ПРОВЕРКА ПОДПИСКИ ======================
+async def is_subscribed(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ["member", "administrator", "creator", "restricted"]
+    except Exception:
+        return False  # если не можем проверить — считаем не подписанным
+
+
+# ====================== API С ЗАЩИТОЙ ======================
+def safe_get(url, params=None):
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print("CoinGecko error:", e)
+        return []
+
+
 def get_top10():
-    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&price_change_percentage=24h"
-    return requests.get(url, timeout=10).json()
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params = {
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": 10,
+        "page": 1,
+        "price_change_percentage": "24h"
+    }
+    return safe_get(url, params)
+
 
 def get_gainers_losers():
-    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=percent_change_24h_desc&per_page=10&page=1"
-    gainers = requests.get(url, timeout=10).json()
-    losers = requests.get(url.replace("desc", "asc"), timeout=10).json()
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params_gainers = {
+        "vs_currency": "usd",
+        "order": "percent_change_24h_desc",
+        "per_page": 10,
+        "page": 1
+    }
+    params_losers = params_gainers.copy()
+    params_losers["order"] = "percent_change_24h_asc"
+    gainers = safe_get(url, params_gainers)
+    losers = safe_get(url, params_losers)
     return gainers[:10], losers[:10]
+
 
 def format_top_message():
     data = get_top10()
+    if not data:
+        return "⚠️ Временные проблемы с данными CoinGecko.\nПопробуй через 30–60 секунд."
+
     text = "Привет! Вот что на рынке прямо сейчас\n\nТоп-10 по капитализации:\n"
     max_change = max(data, key=lambda x: abs(x.get('price_change_percentage_24h', 0)))
 
@@ -40,6 +82,7 @@ def format_top_message():
     text += f"\nОбратить внимание: {max_change['symbol'].upper()} изменился на {max_change.get('price_change_percentage_24h', 0):+.1f}% — самое большое движение!"
     return text
 
+
 def main_keyboard():
     kb = [
         [InlineKeyboardButton(text="Курсы", callback_data="courses"),
@@ -48,62 +91,94 @@ def main_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+
+# ====================== ОБРАБОТЧИКИ ======================
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    user_id = message.from_user.id
+
+    if not await is_subscribed(user_id):
+        sub_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Подписаться на канал", url=f"https://t.me/bot_pro_bot_you")],
+            [InlineKeyboardButton(text="Я подписался ✅", callback_data="check_sub")]
+        ])
+        await message.answer(
+            "👋 Чтобы пользоваться ботом, обязательно подпишись на наш канал!\n\n"
+            "🔗 https://t.me/bot_pro_bot_you\n\n"
+            "После подписки нажми кнопку ниже.",
+            reply_markup=sub_kb
+        )
+        return
+
     text = format_top_message()
     await message.answer(text, reply_markup=main_keyboard())
 
-@dp.callback_query(F.data == "courses")
-async def show_courses(callback: types.CallbackQuery):
-    data = get_top10()
-    text = "Курсы топ-10:\n\n"
-    for i, coin in enumerate(data, 1):
-        symbol = coin['symbol'].upper()
-        price = f"${coin['current_price']:,.0f}" if coin['current_price'] > 10 else f"${coin['current_price']:.4f}"
-        change = coin.get('price_change_percentage_24h', 0)
-        text += f"{i}. {symbol} — {price}   {change:+.1f}%\n"
-    await callback.message.edit_text(text, reply_markup=main_keyboard())
 
-@dp.callback_query(F.data == "changes")
-async def show_changes(callback: types.CallbackQuery):
-    gainers, losers = get_gainers_losers()
-    text = "Изменения за 24ч\n\nГейнеры 🔥\n"
-    for coin in gainers:
-        text += f"{coin['symbol'].upper()}  {coin.get('price_change_percentage_24h', 0):+.1f}%\n"
-    text += "\nЛузеры 📉\n"
-    for coin in losers:
-        text += f"{coin['symbol'].upper()}  {coin.get('price_change_percentage_24h', 0):+.1f}%\n"
-    await callback.message.edit_text(text, reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "forecast")
-async def show_forecast(callback: types.CallbackQuery):
-    if GROQ_API_KEY:
-        try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "llama3-8b-8192",
-                    "messages": [{"role": "user", "content": "Ты крипто-аналитик. Дай короткий честный прогноз по рынку на 24–48 часов: топ гейнеры, риски, общее настроение. Не больше 150 слов."}],
-                    "max_tokens": 300,
-                    "temperature": 0.7
-                },
-                timeout=15
-            )
-            ai_text = r.json()["choices"][0]["message"]["content"]
-        except:
-            ai_text = "Не удалось подключиться к ИИ. Попробуй позже."
+@dp.callback_query(F.data == "check_sub")
+async def check_subscription_callback(callback: types.CallbackQuery):
+    if await is_subscribed(callback.from_user.id):
+        text = format_top_message()
+        await callback.message.edit_text(text, reply_markup=main_keyboard())
+        await callback.answer("✅ Подписка подтверждена!")
     else:
-        ai_text = "Добавь переменную GROQ_API_KEY для настоящего ИИ-прогноза от Groq (бесплатно)."
-    
-    text = f"Прогноз на сегодня:\n\n{ai_text}"
-    await callback.message.edit_text(text, reply_markup=main_keyboard())
+        await callback.answer("❌ Ты ещё не подписался. Подпишись и нажми кнопку снова.", show_alert=True)
+
+
+@dp.callback_query(F.data.in_(["courses", "changes", "forecast"]))
+async def protected_callback(callback: types.CallbackQuery):
+    if not await is_subscribed(callback.from_user.id):
+        await callback.answer("❌ Подпишись на канал, чтобы пользоваться ботом!", show_alert=True)
+        return
+
+    if callback.data == "courses":
+        data = get_top10()
+        if not data:
+            text = "⚠️ Временные проблемы с CoinGecko."
+        else:
+            text = "Курсы топ-10:\n\n"
+            for i, coin in enumerate(data, 1):
+                symbol = coin['symbol'].upper()
+                price = f"${coin['current_price']:,.0f}" if coin['current_price'] > 10 else f"${coin['current_price']:.4f}"
+                change = coin.get('price_change_percentage_24h', 0)
+                text += f"{i}. {symbol} — {price}   {change:+.1f}%\n"
+        await callback.message.edit_text(text, reply_markup=main_keyboard())
+
+    elif callback.data == "changes":
+        gainers, losers = get_gainers_losers()
+        text = "Изменения за 24ч\n\nГейнеры 🔥\n"
+        for coin in gainers:
+            text += f"{coin['symbol'].upper()}  {coin.get('price_change_percentage_24h', 0):+.1f}%\n"
+        text += "\nЛузеры 📉\n"
+        for coin in losers:
+            text += f"{coin['symbol'].upper()}  {coin.get('price_change_percentage_24h', 0):+.1f}%\n"
+        await callback.message.edit_text(text, reply_markup=main_keyboard())
+
+    elif callback.data == "forecast":
+        if GROQ_API_KEY:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": "llama3-8b-8192",
+                        "messages": [{"role": "user", "content": "Ты крипто-аналитик. Дай короткий честный прогноз по рынку на 24–48 часов: топ гейнеры, риски, общее настроение. Не больше 150 слов."}],
+                        "max_tokens": 300,
+                        "temperature": 0.7
+                    },
+                    timeout=15
+                )
+                ai_text = r.json()["choices"][0]["message"]["content"]
+            except:
+                ai_text = "Не удалось получить прогноз от ИИ."
+        else:
+            ai_text = "Добавь GROQ_API_KEY для ИИ-прогноза."
+        text = f"Прогноз на сегодня:\n\n{ai_text}"
+        await callback.message.edit_text(text, reply_markup=main_keyboard())
+
 
 async def main():
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
